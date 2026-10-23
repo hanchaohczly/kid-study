@@ -1,0 +1,122 @@
+name: kid-study
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: kid_study
+      POSTGRES_USER: kid_study
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      TZ: ${TZ:-Asia/Shanghai}
+    secrets:
+      - postgres_password
+    volumes:
+      - ${DATA_DIR:-./data}/postgres:/var/lib/postgresql/data
+      - ./infra/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kid_study -d kid_study"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging: *default-logging
+    networks:
+      - backend
+
+  api:
+    image: ${IMAGE_NAMESPACE:-local}/kid-study-api:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      target: api
+    restart: unless-stopped
+    init: true
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3000
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      TZ: ${TZ:-Asia/Shanghai}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: kid_study
+      POSTGRES_USER: kid_study
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      MODEL_CONFIG_ENCRYPTION_KEY: ${MODEL_CONFIG_ENCRYPTION_KEY:?MODEL_CONFIG_ENCRYPTION_KEY is required}
+      DEV_PARENT_PASSWORD: ${DEV_PARENT_PASSWORD:?DEV_PARENT_PASSWORD is required}
+      DEV_CHILD_PIN: ${DEV_CHILD_PIN:?DEV_CHILD_PIN is required}
+      LLM_API_URL: ${LLM_API_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+    secrets:
+      - postgres_password
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    logging: *default-logging
+    networks:
+      - backend
+
+  web:
+    image: ${IMAGE_NAMESPACE:-local}/kid-study-web:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      target: web
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    logging: *default-logging
+    networks:
+      - backend
+
+  prometheus:
+    image: prom/prometheus:v3.6.0
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+    volumes:
+      - ./infra/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ${DATA_DIR:-./data}/prometheus:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    depends_on:
+      api:
+        condition: service_healthy
+    logging: *default-logging
+    networks:
+      - backend
+
+secrets:
+  postgres_password:
+    file: ${POSTGRES_PASSWORD_FILE:-./secrets/postgres_password}
+
+networks:
+  backend:
+    driver: bridge

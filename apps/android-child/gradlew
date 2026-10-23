@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+
+GRADLE_VERSION=8.10.2
+GRADLE_HOME="${GRADLE_USER_HOME:-$HOME/.gradle}/kid-study/gradle-$GRADLE_VERSION"
+ARCHIVE="${TMPDIR:-/tmp}/gradle-$GRADLE_VERSION-bin.zip"
+
+if [ ! -x "$GRADLE_HOME/bin/gradle" ]; then
+  mkdir -p "$(dirname "$GRADLE_HOME")"
+  curl -L --fail --silent --show-error \
+    "https://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip" \
+    -o "$ARCHIVE"
+  rm -rf "$GRADLE_HOME"
+  unzip -q "$ARCHIVE" -d "$(dirname "$GRADLE_HOME")"
+fi
+
+exec "$GRADLE_HOME/bin/gradle" "$@"

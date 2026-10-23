@@ -1,0 +1,17 @@
+node_modules/
+dist/
+coverage/
+.DS_Store
+.env
+.env.*
+!.env.example
+deploy.env
+secrets/
+infra/compose/secrets/
+*.log
+*.jks
+*.keystore
+data/
+backups/
+apps/web/public/sw.js
+apps/web/public/workbox-*.js

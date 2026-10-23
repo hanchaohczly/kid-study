@@ -1,0 +1,4 @@
+-keepattributes Signature
+-keepattributes *Annotation*
+-keep class com.kidstudy.child.data.** { *; }
+-keep interface com.kidstudy.child.data.** { *; }

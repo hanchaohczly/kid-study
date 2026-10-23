@@ -1,0 +1,24 @@
+{
+  "name": "kid-study",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace @kid-study/contracts && npm run build --workspace @kid-study/api && npm run build --workspace @kid-study/web",
+    "ci": "npm run typecheck && npm test && npm run build",
+    "dev": "npm run dev:api",
+    "dev:api": "npm run build --workspace @kid-study/contracts && npm run dev --workspace @kid-study/api",
+    "dev:web": "npm run dev --workspace @kid-study/web",
+    "loadtest": "node scripts/load-test.mjs",
+    "security:acceptance": "npm run build --workspace @kid-study/contracts && npm run test --workspace @kid-study/api -- guide-service.test.ts app.test.ts",
+    "test": "npm run build --workspace @kid-study/contracts && npm run test --workspace @kid-study/contracts && npm run test --workspace @kid-study/api && npm run test --workspace @kid-study/web",
+    "typecheck": "npm run typecheck --workspace @kid-study/contracts && npm run typecheck --workspace @kid-study/api && npm run typecheck --workspace @kid-study/web"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

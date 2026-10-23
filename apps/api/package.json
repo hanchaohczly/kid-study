@@ -1,0 +1,32 @@
+{
+  "name": "@kid-study/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/server.ts",
+    "migrate:model-config": "tsx src/migrate-model-config.ts",
+    "start": "node dist/server.js",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.0.2",
+    "@fastify/jwt": "^10.0.0",
+    "@fastify/multipart": "^10.1.3",
+    "@fastify/rate-limit": "^10.3.0",
+    "@kid-study/contracts": "*",
+    "fastify": "^5.6.2",
+    "pdf-parse": "^2.4.5",
+    "pg": "^8.16.3",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "@types/pg": "^8.15.6",
+    "tsx": "^4.20.6",
+    "typescript": "~6.0.2",
+    "vitest": "^4.0.3"
+  }
+}
