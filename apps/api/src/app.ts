@@ -39,6 +39,13 @@ import {
 } from './modules/textbooks/textbook-import-service.js'
 import { PostgresTextbookImportRepository } from './modules/textbooks/postgres-textbook-import-repository.js'
 import {
+  WordbookService,
+  wordbookDraftSchema,
+} from './modules/words/wordbook-service.js'
+import { InMemoryWordbookRepository } from './modules/words/in-memory-wordbook-repository.js'
+import { PostgresWordbookRepository } from './modules/words/postgres-wordbook-repository.js'
+import { DocxTextExtractor } from './modules/words/docx-text-extractor.js'
+import {
   ModelConfigService,
   SecretCipher,
   type ModelCapability,
@@ -92,6 +99,7 @@ interface BuildAppOptions {
   wrongBookRepository?: WrongBookRepository
   photoWrongAnalyzer?: PhotoWrongAnalyzer
   planningRepository?: PlanningRepository
+  wordbookService?: WordbookService
   modelConfigRepository?: ModelConfigRepository
   logger?: boolean
   startSchedulers?: boolean
@@ -243,6 +251,15 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
         ? new PostgresTextbookImportRepository(config.databaseUrl)
         : new InMemoryTextbookImportRepository(),
     )
+  const wordbookService =
+    options.wordbookService ??
+    new WordbookService(
+      config.databaseUrl
+        ? new PostgresWordbookRepository(config.databaseUrl)
+        : new InMemoryWordbookRepository(),
+    )
+  const pdfTextExtractor = new PdfParseTextExtractor()
+  const docxTextExtractor = new DocxTextExtractor()
 
   await registerAuth(app, config)
   await app.register(multipart, {
@@ -1030,6 +1047,381 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     },
   )
 
+  app.post(
+    '/v1/wordbooks/upload',
+    { preHandler: authenticate },
+    async (request, reply) => {
+      if (request.authContext.role !== 'parent') {
+        return notFound(reply, request.id)
+      }
+      const file = await request.file()
+      if (!file) {
+        return reply.code(400).send({
+          code: 'INVALID_WORDBOOK_FILE',
+          message: '请选择单词本文件（PDF 或 Word .docx）',
+          requestId: request.id,
+          retryable: false,
+        })
+      }
+      const fileName = file.filename ?? ''
+      const lower = fileName.toLowerCase()
+      if (lower.endsWith('.doc')) {
+        return reply.code(400).send({
+          code: 'INVALID_WORDBOOK_FILE',
+          message: '不支持旧版 .doc，请另存为 .docx 后再上传',
+          requestId: request.id,
+          retryable: false,
+        })
+      }
+      const isPdf =
+        file.mimetype === 'application/pdf' || lower.endsWith('.pdf')
+      const isDocx =
+        file.mimetype ===
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+        lower.endsWith('.docx')
+      if (!isPdf && !isDocx) {
+        return reply.code(400).send({
+          code: 'INVALID_WORDBOOK_FILE',
+          message: '仅支持 PDF 或 Word（.docx）文件',
+          requestId: request.id,
+          retryable: false,
+        })
+      }
+      try {
+        const buffer = await file.toBuffer()
+        let text = ''
+        if (isPdf) {
+          try {
+            text = (await pdfTextExtractor.extract(buffer)).text
+          } catch {
+            throw new Error('INVALID_PDF')
+          }
+        } else {
+          text = await docxTextExtractor.extract(buffer)
+        }
+        const wordbook = await wordbookService.import({
+          familyId: request.authContext.familyId,
+          createdBy: request.authContext.userId,
+          fileName,
+          sourceType: isPdf ? 'pdf' : 'docx',
+          text,
+        })
+        return reply.code(201).send({ wordbook })
+      } catch (error) {
+        return wordbookError(error, reply, request.id)
+      }
+    },
+  )
+
+  app.get(
+    '/v1/wordbooks',
+    { preHandler: authenticate },
+    async (request, reply) => {
+      if (request.authContext.role !== 'parent') {
+        return notFound(reply, request.id)
+      }
+      const wordbooks = await wordbookService.list(request.authContext.familyId)
+      return {
+        // 列表只返回概况，词条明细走 /v1/wordbooks/:id
+        wordbooks: wordbooks.map((wordbook) => ({
+          ...wordbook,
+          entries: undefined,
+        })),
+      }
+    },
+  )
+
+  app.get(
+    '/v1/wordbooks/:id',
+    { preHandler: authenticate },
+    async (request, reply) => {
+      if (request.authContext.role !== 'parent') {
+        return notFound(reply, request.id)
+      }
+      const parsed = z.object({ id: z.uuid() }).safeParse(request.params)
+      if (!parsed.success) {
+        return invalidContent(reply, request.id, parsed.error.issues)
+      }
+      const wordbook = await wordbookService.get(
+        request.authContext.familyId,
+        parsed.data.id,
+      )
+      if (!wordbook) return notFound(reply, request.id)
+      return { wordbook }
+    },
+  )
+
+  app.patch(
+    '/v1/wordbooks/:id',
+    { preHandler: authenticate },
+    async (request, reply) => {
+      if (request.authContext.role !== 'parent') {
+        return notFound(reply, request.id)
+      }
+      const params = z.object({ id: z.uuid() }).safeParse(request.params)
+      const body = z
+        .object({ entries: wordbookDraftSchema.shape.entries })
+        .safeParse(request.body)
+      if (!params.success) {
+        return invalidContent(reply, request.id, params.error.issues)
+      }
+      if (!body.success) {
+        return invalidContent(reply, request.id, body.error.issues)
+      }
+      try {
+        const wordbook = await wordbookService.updateDraft({
+          familyId: request.authContext.familyId,
+          id: params.data.id,
+          entries: body.data.entries,
+        })
+        return { wordbook }
+      } catch (error) {
+        return wordbookError(error, reply, request.id)
+      }
+    },
+  )
+
+  app.post(
+    '/v1/wordbooks/:id/confirm',
+    { preHandler: authenticate },
+    async (request, reply) => {
+      if (request.authContext.role !== 'parent') {
+        return notFound(reply, request.id)
+      }
+      const parsed = z.object({ id: z.uuid() }).safeParse(request.params)
+      if (!parsed.success) {
+        return invalidContent(reply, request.id, parsed.error.issues)
+      }
+      try {
+        const wordbook = await wordbookService.confirm({
+          familyId: request.authContext.familyId,
+          id: parsed.data.id,
+          createdBy: request.authContext.userId,
+        })
+        return { wordbook }
+      } catch (error) {
+        return wordbookError(error, reply, request.id)
+      }
+    },
+  )
+
+  app.delete(
+    '/v1/wordbooks/:id',
+    { preHandler: authenticate },
+    async (request, reply) => {
+      if (request.authContext.role !== 'parent') {
+        return notFound(reply, request.id)
+      }
+      const parsed = z.object({ id: z.uuid() }).safeParse(request.params)
+      if (!parsed.success) {
+        return invalidContent(reply, request.id, parsed.error.issues)
+      }
+      await wordbookService.remove(
+        request.authContext.familyId,
+        parsed.data.id,
+      )
+      return reply.code(204).send()
+    },
+  )
+
+  app.post(
+    '/v1/word-quizzes',
+    { preHandler: authenticate },
+    async (request, reply) => {
+      if (request.authContext.role !== 'parent' || !request.authContext.kidId) {
+        return notFound(reply, request.id)
+      }
+      const parsed = z
+        .object({
+          wordbookId: z.uuid(),
+          direction: z.enum(['en_to_zh', 'zh_to_en']),
+          count: z.number().int().min(1).max(50).default(10),
+          deliveryMode: z.enum(['passport', 'web']).default('passport'),
+        })
+        .safeParse(request.body)
+      if (!parsed.success) {
+        return invalidContent(reply, request.id, parsed.error.issues)
+      }
+      try {
+        const { quiz, questions } = await wordbookService.createQuiz({
+          familyId: request.authContext.familyId,
+          kidId: request.authContext.kidId,
+          createdBy: request.authContext.userId,
+          ...parsed.data,
+        })
+        return reply.code(201).send({
+          quiz,
+          questionCount: questions.length,
+        })
+      } catch (error) {
+        return wordbookError(error, reply, request.id)
+      }
+    },
+  )
+
+  app.get(
+    '/v1/word-quizzes',
+    { preHandler: authenticate },
+    async (request, reply) => {
+      const kidId = request.authContext.kidId
+      if (!kidId) return notFound(reply, request.id)
+      const parsed = z
+        .object({ limit: z.coerce.number().int().min(1).max(50).default(10) })
+        .safeParse(request.query)
+      if (!parsed.success) {
+        return invalidContent(reply, request.id, parsed.error.issues)
+      }
+      return {
+        quizzes: await wordbookService.listQuizzes(
+          request.authContext.familyId,
+          kidId,
+          parsed.data.limit,
+        ),
+      }
+    },
+  )
+
+  app.get(
+    '/v1/word-quizzes/:id',
+    { preHandler: authenticate },
+    async (request, reply) => {
+      const params = z.object({ id: z.uuid() }).safeParse(request.params)
+      if (!params.success) {
+        return invalidContent(reply, request.id, params.error.issues)
+      }
+      try {
+        const quiz = await wordbookService.getQuiz(
+          request.authContext.familyId,
+          params.data.id,
+          request.authContext.kidId,
+        )
+        const questions = await wordbookService.listQuizQuestions(
+          request.authContext.familyId,
+          quiz.id,
+        )
+        // 随身设备离线作答时需要答案，仅 passport 模式返回
+        const withAnswers = quiz.deliveryMode === 'passport'
+        return {
+          quiz,
+          questions: questions.map((question) => ({
+            id: question.id,
+            position: question.position,
+            stem: question.stem,
+            options: question.options,
+            ...(withAnswers ? { answerKey: question.answerKey } : {}),
+          })),
+        }
+      } catch (error) {
+        return wordbookError(error, reply, request.id)
+      }
+    },
+  )
+
+  app.post(
+    '/v1/word-quizzes/:id/answers',
+    { preHandler: authenticate },
+    async (request, reply) => {
+      if (request.authContext.role !== 'child' || !request.authContext.kidId) {
+        return notFound(reply, request.id)
+      }
+      const params = z.object({ id: z.uuid() }).safeParse(request.params)
+      const body = z
+        .object({
+          answers: z
+            .array(
+              z.object({
+                questionId: z.uuid(),
+                selectedKey: z.enum(['A', 'B', 'C', 'D']),
+                clientEventId: z.string().trim().min(1).max(120).optional(),
+              }),
+            )
+            .min(1)
+            .max(50),
+        })
+        .safeParse(request.body)
+      if (!params.success) {
+        return invalidContent(reply, request.id, params.error.issues)
+      }
+      if (!body.success) {
+        return invalidContent(reply, request.id, body.error.issues)
+      }
+      try {
+        return await wordbookService.submitAnswers({
+          familyId: request.authContext.familyId,
+          kidId: request.authContext.kidId,
+          quizId: params.data.id,
+          answers: body.data.answers,
+        })
+      } catch (error) {
+        return wordbookError(error, reply, request.id)
+      }
+    },
+  )
+
+  app.get(
+    '/v1/word-stats',
+    { preHandler: authenticate },
+    async (request, reply) => {
+      const kidId = request.authContext.kidId
+      if (!kidId) return notFound(reply, request.id)
+      return wordbookService.stats(request.authContext.familyId, kidId)
+    },
+  )
+
+  app.get(
+    '/v1/word-wrong-items',
+    { preHandler: authenticate },
+    async (request, reply) => {
+      const kidId = request.authContext.kidId
+      if (!kidId) return notFound(reply, request.id)
+      const parsed = z
+        .object({
+          status: z.enum(['active', 'mastered']).optional(),
+          limit: z.coerce.number().int().min(1).max(200).default(100),
+        })
+        .safeParse(request.query)
+      if (!parsed.success) {
+        return invalidContent(reply, request.id, parsed.error.issues)
+      }
+      const items = await wordbookService.listWrongItems(
+        request.authContext.familyId,
+        kidId,
+        parsed.data.status,
+      )
+      return { items: items.slice(0, parsed.data.limit) }
+    },
+  )
+
+  app.patch(
+    '/v1/word-wrong-items/:id',
+    { preHandler: authenticate },
+    async (request, reply) => {
+      const kidId = request.authContext.kidId
+      if (!kidId) return notFound(reply, request.id)
+      const params = z.object({ id: z.uuid() }).safeParse(request.params)
+      const body = z
+        .object({ status: z.enum(['active', 'mastered']) })
+        .safeParse(request.body)
+      if (!params.success) {
+        return invalidContent(reply, request.id, params.error.issues)
+      }
+      if (!body.success) {
+        return invalidContent(reply, request.id, body.error.issues)
+      }
+      try {
+        await wordbookService.updateWrongStatus({
+          familyId: request.authContext.familyId,
+          kidId,
+          id: params.data.id,
+          status: body.data.status,
+        })
+        return { ok: true }
+      } catch (error) {
+        return wordbookError(error, reply, request.id)
+      }
+    },
+  )
+
   app.get(
     '/v1/training/today',
     { preHandler: authenticate },
@@ -1512,11 +1904,77 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       guideAuditRepository.close(),
       wrongBookService.close(),
       planningService.close(),
+      wordbookService.close(),
     ])
   })
 
   if (options.startSchedulers ?? true) routineScheduler.start()
   return app
+}
+
+function wordbookError(
+  error: unknown,
+  reply: FastifyReply,
+  requestId: string,
+) {
+  if (!(error instanceof Error)) throw error
+  const notFoundCodes = new Set([
+    'WORDBOOK_NOT_FOUND',
+    'WORD_QUIZ_NOT_FOUND',
+    'WORD_QUIZ_QUESTION_NOT_FOUND',
+    'WORD_WRONG_ITEM_NOT_FOUND',
+  ])
+  if (notFoundCodes.has(error.message)) return notFound(reply, requestId)
+
+  const known: Record<
+    string,
+    { status: number; message: string; retryable: boolean }
+  > = {
+    WORDBOOK_NO_ENTRIES: {
+      status: 422,
+      message:
+        '未能从文件中识别出词条，请确认每行包含英文单词与中文释义，或改为粘贴文本导入',
+      retryable: false,
+    },
+    WORDBOOK_NOT_CONFIRMED: {
+      status: 409,
+      message: '请先确认单词本内容，再创建考察',
+      retryable: false,
+    },
+    WORDBOOK_ALREADY_CONFIRMED: {
+      status: 409,
+      message: '单词本已确认，不能再次修改词条',
+      retryable: false,
+    },
+    WORDBOOK_TOO_SMALL: {
+      status: 409,
+      message: '单词本至少需要 4 个释义互不相同的词条才能出选择题',
+      retryable: false,
+    },
+    INVALID_PDF: {
+      status: 422,
+      message: '文件不是有效的 PDF',
+      retryable: false,
+    },
+    PDF_TEXT_LAYER_REQUIRED: {
+      status: 422,
+      message: 'PDF 没有可提取文本（可能是扫描件），请提供电子版或改用 Word',
+      retryable: false,
+    },
+    DOCX_UNREADABLE: {
+      status: 422,
+      message: 'Word 文件无法解析，请另存为 .docx 后重试',
+      retryable: false,
+    },
+  }
+  const mapped = known[error.message]
+  if (!mapped) throw error
+  return reply.code(mapped.status).send({
+    code: error.message,
+    message: mapped.message,
+    requestId,
+    retryable: mapped.retryable,
+  })
 }
 
 function wrongBookError(

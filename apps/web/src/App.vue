@@ -17,6 +17,7 @@ import {
   Eye,
   FileText,
   GitBranch,
+  Languages,
   Lightbulb,
   ListTodo,
   LogOut,
@@ -37,11 +38,14 @@ import {
   checkAnswer,
   changeTaskStatus,
   confirmTextbookImport,
+  confirmWordbook,
   confirmCurriculumProgress,
   createAssessment,
   createCurriculumProgress,
   createRoutineAssessment,
   createTask,
+  createWordQuiz,
+  deleteWordbook,
   deleteWrongItem,
   fetchModelOptions,
   getAssessmentRecommendations,
@@ -56,7 +60,12 @@ import {
   getTextbookProgress,
   getTodayTraining,
   getWeeklyReport,
+  getWordQuiz,
+  getWordStats,
+  getWordWrongItems,
   getWrongItems,
+  listWordQuizzes,
+  listWordbooks,
   login,
   logout,
   reviewWrongItem,
@@ -64,8 +73,11 @@ import {
   saveModelConfig,
   startTrainingAttempt,
   submitMasteryReview,
+  submitWordAnswers,
+  updateWordWrongItem,
   updateWrongItem,
   uploadTextbook,
+  uploadWordbook,
   uploadWrongItemPhoto,
   type Assessment,
   type ContentSnapshot,
@@ -82,6 +94,13 @@ import {
   type TodayTraining,
   type TaskSnapshot,
   type WeeklyReport,
+  type Wordbook,
+  type WordQuiz,
+  type WordQuizDirection,
+  type WordQuizQuestion,
+  type WordStats,
+  type WordWrongItem,
+  type WordWrongItemStatus,
   type WrongBookSnapshot,
   type WrongItem,
   type WrongItemStatus,
@@ -119,9 +138,15 @@ const syncActive = ref(false)
 const actionError = ref('')
 const pendingAnswerQuestionId = ref('')
 const parentMode = ref<
-  'assessment' | 'planning' | 'content' | 'wrongBook' | 'review' | 'models'
+  | 'assessment'
+  | 'planning'
+  | 'content'
+  | 'wrongBook'
+  | 'review'
+  | 'models'
+  | 'words'
 >('assessment')
-const childMode = ref<'training' | 'tasks' | 'wrongBook'>('training')
+const childMode = ref<'training' | 'tasks' | 'wrongBook' | 'words'>('training')
 const content = ref<ContentSnapshot | null>(null)
 const contentLoading = ref(false)
 const contentError = ref('')
@@ -168,6 +193,36 @@ const savingWrongItemId = ref('')
 const wrongItemDrafts = ref<
   Record<string, { kpId: string; tags: string; note: string }>
 >({})
+const wordbooks = ref<Wordbook[]>([])
+const wordbooksLoading = ref(false)
+const wordbookFile = ref<File | null>(null)
+const wordbookInput = ref<HTMLInputElement | null>(null)
+const uploadingWordbook = ref(false)
+const confirmingWordbookId = ref('')
+const deletingWordbookId = ref('')
+const wordbookMessage = ref('')
+const wordbookError = ref('')
+const wordQuizBookId = ref('')
+const wordQuizDirection = ref<WordQuizDirection>('en_to_zh')
+const wordQuizCount = ref(10)
+const wordQuizDeliveryMode = ref<'passport' | 'web'>('passport')
+const creatingWordQuiz = ref(false)
+const wordQuizzes = ref<WordQuiz[]>([])
+const wordQuizzesLoading = ref(false)
+const activeWordQuiz = ref<{
+  quiz: WordQuiz
+  questions: WordQuizQuestion[]
+} | null>(null)
+const wordAnswerIndex = ref(0)
+const wordAnswers = ref<Record<string, 'A' | 'B' | 'C' | 'D'>>({})
+const wordQuizResults = ref<
+  Array<{ questionId: string; isCorrect: boolean; answerKey: string }> | null
+>(null)
+const submittingWordQuiz = ref(false)
+const wordStats = ref<WordStats | null>(null)
+const wordWrongItems = ref<WordWrongItem[]>([])
+const wordWrongStatus = ref<WordWrongItemStatus>('active')
+const wordWrongLoading = ref(false)
 const taskSnapshot = ref<TaskSnapshot | null>(null)
 const curriculumProgress = ref<CurriculumProgress[]>([])
 const weeklyReport = ref<WeeklyReport | null>(null)
@@ -249,6 +304,25 @@ const trainingComplete = computed(
 const noTrainingAssigned = computed(
   () => Boolean(training.value) && training.value?.questions.length === 0,
 )
+const confirmedWordbooks = computed(() =>
+  wordbooks.value.filter((item) => item.status === 'confirmed'),
+)
+const currentWordQuestion = computed(
+  () => activeWordQuiz.value?.questions[wordAnswerIndex.value] ?? null,
+)
+const currentWordSelection = computed(() => {
+  const question = currentWordQuestion.value
+  if (!question) return ''
+  return wordAnswers.value[question.id] ?? ''
+})
+const wordAnsweredCount = computed(() => Object.keys(wordAnswers.value).length)
+const wordCorrectCount = computed(
+  () => wordQuizResults.value?.filter((item) => item.isCorrect).length ?? 0,
+)
+const wordAccuracyLabel = computed(() => {
+  if (!wordStats.value?.totalAnswers) return '—'
+  return `${Math.round(wordStats.value.accuracy * 100)}%`
+})
 const publishedKnowledgePointCount = computed(
   () =>
     content.value?.knowledgePoints.filter((item) => item.status === 'published')
@@ -578,21 +652,234 @@ async function openParentMode(
     | 'content'
     | 'wrongBook'
     | 'review'
-    | 'models',
+    | 'models'
+    | 'words',
 ) {
   parentMode.value = nextMode
   if (nextMode === 'review') await loadMastery()
   if (nextMode === 'wrongBook') await loadWrongBook()
   if (nextMode === 'planning') await loadPlanning()
+  if (nextMode === 'words') {
+    await loadWordbooks()
+    await loadWordStats()
+  }
 }
 
-async function openChildMode(nextMode: 'training' | 'tasks' | 'wrongBook') {
+async function openChildMode(
+  nextMode: 'training' | 'tasks' | 'wrongBook' | 'words',
+) {
   childMode.value = nextMode
   if (nextMode === 'wrongBook') {
     wrongBookStatus.value = 'active'
     await loadWrongBook()
   }
   if (nextMode === 'tasks') await loadChildTasks()
+  if (nextMode === 'words') {
+    activeWordQuiz.value = null
+    wordQuizResults.value = null
+    await Promise.all([loadWordQuizzes(), loadWordStats(), loadWordWrongItems()])
+  }
+}
+
+async function loadWordbooks() {
+  wordbooksLoading.value = true
+  wordbookError.value = ''
+  try {
+    wordbooks.value = await listWordbooks()
+    if (!wordQuizBookId.value) {
+      const first = wordbooks.value.find((item) => item.status === 'confirmed')
+      if (first) wordQuizBookId.value = first.id
+    }
+  } catch (error) {
+    wordbookError.value =
+      error instanceof Error ? error.message : '单词本加载失败'
+  } finally {
+    wordbooksLoading.value = false
+  }
+}
+
+function handleWordbookFileChange(event: Event) {
+  const input = event.target as HTMLInputElement
+  wordbookFile.value = input.files?.[0] ?? null
+}
+
+async function handleWordbookUpload() {
+  const file = wordbookFile.value
+  if (!file) return
+  uploadingWordbook.value = true
+  wordbookError.value = ''
+  wordbookMessage.value = ''
+  try {
+    const wordbook = await uploadWordbook(file)
+    wordbookMessage.value = `已识别 ${wordbook.entryCount} 个词条，请确认后使用`
+    wordbookFile.value = null
+    if (wordbookInput.value) wordbookInput.value.value = ''
+    await loadWordbooks()
+  } catch (error) {
+    wordbookError.value =
+      error instanceof Error ? error.message : '单词本上传失败'
+  } finally {
+    uploadingWordbook.value = false
+  }
+}
+
+async function handleConfirmWordbook(wordbook: Wordbook) {
+  confirmingWordbookId.value = wordbook.id
+  wordbookError.value = ''
+  try {
+    await confirmWordbook(wordbook.id)
+    wordbookMessage.value = '单词本已确认，可以下发考察'
+    await loadWordbooks()
+    wordQuizBookId.value = wordbook.id
+  } catch (error) {
+    wordbookError.value =
+      error instanceof Error ? error.message : '确认单词本失败'
+  } finally {
+    confirmingWordbookId.value = ''
+  }
+}
+
+async function handleDeleteWordbook(wordbook: Wordbook) {
+  deletingWordbookId.value = wordbook.id
+  wordbookError.value = ''
+  try {
+    await deleteWordbook(wordbook.id)
+    if (wordQuizBookId.value === wordbook.id) wordQuizBookId.value = ''
+    wordbookMessage.value = '单词本已删除'
+    await loadWordbooks()
+  } catch (error) {
+    wordbookError.value =
+      error instanceof Error ? error.message : '删除单词本失败'
+  } finally {
+    deletingWordbookId.value = ''
+  }
+}
+
+async function handleCreateWordQuiz() {
+  if (!wordQuizBookId.value) return
+  creatingWordQuiz.value = true
+  wordbookError.value = ''
+  wordbookMessage.value = ''
+  try {
+    const result = await createWordQuiz({
+      wordbookId: wordQuizBookId.value,
+      direction: wordQuizDirection.value,
+      count: wordQuizCount.value,
+      deliveryMode: wordQuizDeliveryMode.value,
+    })
+    wordbookMessage.value =
+      wordQuizDeliveryMode.value === 'passport'
+        ? `已下发 ${result.questionCount} 道单词题到随身设备`
+        : `已生成 ${result.questionCount} 道单词题，可在网页端作答`
+  } catch (error) {
+    wordbookError.value =
+      error instanceof Error ? error.message : '创建单词考察失败'
+  } finally {
+    creatingWordQuiz.value = false
+  }
+}
+
+async function loadWordQuizzes() {
+  wordQuizzesLoading.value = true
+  try {
+    wordQuizzes.value = await listWordQuizzes(20)
+  } catch (error) {
+    wordbookError.value =
+      error instanceof Error ? error.message : '单词考察加载失败'
+  } finally {
+    wordQuizzesLoading.value = false
+  }
+}
+
+async function openWordQuiz(quiz: WordQuiz) {
+  wordbookError.value = ''
+  wordQuizResults.value = null
+  try {
+    const detail = await getWordQuiz(quiz.id)
+    activeWordQuiz.value = detail
+    wordAnswerIndex.value = 0
+    wordAnswers.value = {}
+  } catch (error) {
+    wordbookError.value =
+      error instanceof Error ? error.message : '题目加载失败'
+  }
+}
+
+function selectWordOption(key: 'A' | 'B' | 'C' | 'D') {
+  const question = activeWordQuiz.value?.questions[wordAnswerIndex.value]
+  if (!question) return
+  wordAnswers.value = { ...wordAnswers.value, [question.id]: key }
+}
+
+function stepWordQuiz(delta: number) {
+  const total = activeWordQuiz.value?.questions.length ?? 0
+  const next = wordAnswerIndex.value + delta
+  if (next < 0 || next >= total) return
+  wordAnswerIndex.value = next
+}
+
+async function handleSubmitWordQuiz() {
+  const quiz = activeWordQuiz.value
+  if (!quiz) return
+  const answers = Object.entries(wordAnswers.value).map(
+    ([questionId, selectedKey]) => ({ questionId, selectedKey }),
+  )
+  if (!answers.length) return
+  submittingWordQuiz.value = true
+  wordbookError.value = ''
+  try {
+    const result = await submitWordAnswers(quiz.quiz.id, answers)
+    wordQuizResults.value = result.results
+    await Promise.all([loadWordStats(), loadWordWrongItems()])
+  } catch (error) {
+    wordbookError.value =
+      error instanceof Error ? error.message : '提交答案失败'
+  } finally {
+    submittingWordQuiz.value = false
+  }
+}
+
+async function loadWordStats() {
+  try {
+    wordStats.value = await getWordStats()
+  } catch {
+    wordStats.value = null
+  }
+}
+
+async function loadWordWrongItems() {
+  wordWrongLoading.value = true
+  try {
+    wordWrongItems.value = await getWordWrongItems(wordWrongStatus.value)
+  } catch (error) {
+    wordbookError.value =
+      error instanceof Error ? error.message : '单词错题加载失败'
+  } finally {
+    wordWrongLoading.value = false
+  }
+}
+
+async function switchWordWrongStatus(status: WordWrongItemStatus) {
+  wordWrongStatus.value = status
+  await loadWordWrongItems()
+}
+
+function handleWordWrongStatusChange(event: Event) {
+  const value = (event.target as HTMLSelectElement).value
+  void switchWordWrongStatus(value as WordWrongItemStatus)
+}
+
+async function handleWordWrongStatus(
+  item: WordWrongItem,
+  status: WordWrongItemStatus,
+) {
+  try {
+    await updateWordWrongItem(item.id, status)
+    await loadWordWrongItems()
+  } catch (error) {
+    wordbookError.value =
+      error instanceof Error ? error.message : '更新单词错题失败'
+  }
 }
 
 async function loadChildTasks() {
@@ -1760,6 +2047,14 @@ async function runSync() {
             <BookMarked :size="16" />
             错题复习
           </button>
+          <button
+            type="button"
+            :class="{ active: childMode === 'words' }"
+            @click="openChildMode('words')"
+          >
+            <Languages :size="16" />
+            单词考察
+          </button>
         </div>
         <button
           class="sync-button"
@@ -1791,6 +2086,8 @@ async function runSync() {
                   ? '教材知识库'
                   : parentMode === 'wrongBook'
                     ? '错题集'
+                  : parentMode === 'words'
+                    ? '英语单词考察'
                   : parentMode === 'models'
                     ? '模型能力配置'
                     : '本周学习证据'
@@ -1840,6 +2137,14 @@ async function runSync() {
         >
           <BookMarked :size="17" />
           错题集
+        </button>
+        <button
+          type="button"
+          :class="{ active: parentMode === 'words' }"
+          @click="openParentMode('words')"
+        >
+          <Languages :size="17" />
+          单词考察
         </button>
         <button
           type="button"
@@ -2910,6 +3215,246 @@ async function runSync() {
         </section>
       </template>
 
+      <template v-else-if="parentMode === 'words'">
+        <p v-if="wordbookError" class="form-error content-notice" role="alert">
+          {{ wordbookError }}
+        </p>
+        <p
+          v-if="wordbookMessage"
+          class="success-message content-notice"
+          role="status"
+        >
+          {{ wordbookMessage }}
+        </p>
+
+        <section class="import-band">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">单词本</p>
+              <h2>导入英语单词本</h2>
+              <p>支持 PDF 与 Word（.docx），每行需包含英文单词与中文释义。</p>
+            </div>
+          </div>
+          <form class="upload-form" @submit.prevent="handleWordbookUpload">
+            <label class="file-picker" for="wordbook-file">
+              <FileText :size="18" />
+              <span>{{ wordbookFile?.name ?? '选择单词本文件' }}</span>
+              <input
+                id="wordbook-file"
+                ref="wordbookInput"
+                type="file"
+                accept=".pdf,.docx"
+                @change="handleWordbookFileChange"
+              />
+            </label>
+            <button
+              class="primary-button compact no-margin"
+              type="submit"
+              :disabled="!wordbookFile || uploadingWordbook"
+            >
+              <Upload :size="17" />
+              <span>{{ uploadingWordbook ? '正在识别' : '上传并识别' }}</span>
+            </button>
+          </form>
+        </section>
+
+        <section class="content-section">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">词本列表</p>
+              <h2>已导入的单词本</h2>
+            </div>
+            <span>{{ wordbooks.length }} 本</span>
+          </div>
+          <section v-if="wordbooksLoading" class="empty-state compact-empty">
+            <div class="loader" aria-label="正在加载单词本" />
+          </section>
+          <div v-else-if="wordbooks.length" class="wrong-item-list">
+            <article v-for="book in wordbooks" :key="book.id" class="wrong-item">
+              <div class="task-heading">
+                <div>
+                  <span>{{ book.sourceType.toUpperCase() }}</span>
+                  <h2>{{ book.name }}</h2>
+                </div>
+                <span class="task-status">
+                  {{ book.status === 'confirmed' ? '已确认' : '待确认' }}
+                </span>
+              </div>
+              <p>{{ book.entryCount }} 个词条 · {{ book.fileName }}</p>
+              <div class="wrong-item-actions">
+                <button
+                  v-if="book.status !== 'confirmed'"
+                  class="primary-button compact no-margin"
+                  type="button"
+                  :disabled="confirmingWordbookId === book.id"
+                  @click="handleConfirmWordbook(book)"
+                >
+                  <Check :size="16" />
+                  {{ confirmingWordbookId === book.id ? '确认中' : '确认词本' }}
+                </button>
+                <button
+                  v-else
+                  class="ghost-button compact no-margin"
+                  type="button"
+                  @click="wordQuizBookId = book.id"
+                >
+                  <ClipboardCheck :size="16" />
+                  选为考察词本
+                </button>
+                <button
+                  class="icon-button"
+                  type="button"
+                  title="删除"
+                  :disabled="deletingWordbookId === book.id"
+                  @click="handleDeleteWordbook(book)"
+                >
+                  <Trash2 :size="16" />
+                </button>
+              </div>
+            </article>
+          </div>
+          <section v-else class="empty-state compact-empty">
+            <Languages :size="30" />
+            <h2>还没有单词本</h2>
+            <p>上传 PDF 或 Word 词表后，系统会自动拆分出词条。</p>
+          </section>
+        </section>
+
+        <section class="assessment-launcher">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">下发考察</p>
+              <h2>用选择题考察单词掌握</h2>
+              <p>题目由词表本地生成，不依赖大模型，可离线在随身设备完成。</p>
+            </div>
+          </div>
+          <div class="assessment-filters">
+            <label>
+              <span>词本</span>
+              <select v-model="wordQuizBookId">
+                <option value="">请选择已确认的单词本</option>
+                <option
+                  v-for="book in confirmedWordbooks"
+                  :key="book.id"
+                  :value="book.id"
+                >
+                  {{ book.name }}（{{ book.entryCount }} 词）
+                </option>
+              </select>
+            </label>
+            <label>
+              <span>题型</span>
+              <select v-model="wordQuizDirection">
+                <option value="en_to_zh">英译中（四选一）</option>
+                <option value="zh_to_en">中译英（四选一）</option>
+              </select>
+            </label>
+            <label>
+              <span>题量</span>
+              <select v-model.number="wordQuizCount">
+                <option :value="10">10 题</option>
+                <option :value="20">20 题</option>
+                <option :value="30">30 题</option>
+              </select>
+            </label>
+            <label>
+              <span>作答方式</span>
+              <select v-model="wordQuizDeliveryMode">
+                <option value="passport">下发随身设备</option>
+                <option value="web">网页端作答</option>
+              </select>
+            </label>
+          </div>
+          <button
+            class="primary-button compact"
+            type="button"
+            :disabled="!wordQuizBookId || creatingWordQuiz"
+            @click="handleCreateWordQuiz"
+          >
+            <ClipboardCheck :size="17" />
+            {{ creatingWordQuiz ? '正在生成' : '生成考察' }}
+          </button>
+        </section>
+
+        <section class="summary-band content-summary">
+          <div>
+            <span>{{ wordStats?.totalAnswers ?? 0 }}</span>
+            <small>累计作答题数</small>
+          </div>
+          <div>
+            <span>{{ wordAccuracyLabel }}</span>
+            <small>单词正确率</small>
+          </div>
+          <div>
+            <span>{{ wordStats?.wrongItems.active ?? 0 }}</span>
+            <small>待巩固单词</small>
+          </div>
+          <div>
+            <span>{{ wordStats?.wrongItems.mastered ?? 0 }}</span>
+            <small>已掌握单词</small>
+          </div>
+        </section>
+
+        <section class="content-section">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">单词错题本</p>
+              <h2>需要再记一遍的单词</h2>
+            </div>
+            <label class="status-filter">
+              <span>状态</span>
+              <select :value="wordWrongStatus" @change="handleWordWrongStatusChange">
+                <option value="active">待巩固</option>
+                <option value="mastered">已掌握</option>
+              </select>
+            </label>
+          </div>
+          <section v-if="wordWrongLoading" class="empty-state compact-empty">
+            <div class="loader" aria-label="正在加载单词错题" />
+          </section>
+          <div v-else-if="wordWrongItems.length" class="wrong-item-list">
+            <article
+              v-for="item in wordWrongItems"
+              :key="item.id"
+              class="wrong-item"
+            >
+              <div class="task-heading">
+                <div>
+                  <span>{{ item.wrongCount }} 次错误</span>
+                  <h2>{{ item.word }}</h2>
+                </div>
+                <span class="task-status">
+                  {{ item.status === 'active' ? '待巩固' : '已掌握' }}
+                </span>
+              </div>
+              <p>
+                {{ item.phonetic ? `/${item.phonetic}/ ` : '' }}{{ item.meaning }}
+              </p>
+              <div class="wrong-item-actions">
+                <button
+                  class="ghost-button compact no-margin"
+                  type="button"
+                  @click="
+                    handleWordWrongStatus(
+                      item,
+                      item.status === 'active' ? 'mastered' : 'active',
+                    )
+                  "
+                >
+                  <CheckCircle2 :size="16" />
+                  {{ item.status === 'active' ? '标记已掌握' : '重新加入复习' }}
+                </button>
+              </div>
+            </article>
+          </div>
+          <section v-else class="empty-state compact-empty">
+            <CheckCircle2 :size="30" />
+            <h2>暂无单词错题</h2>
+            <p>孩子答错的单词会自动进入这里。</p>
+          </section>
+        </section>
+      </template>
+
       <template v-else-if="parentMode === 'models'">
         <p v-if="modelError" class="form-error content-notice" role="alert">
           {{ modelError }}
@@ -3670,7 +4215,7 @@ async function runSync() {
       </section>
     </main>
 
-    <main v-else class="child-wrong-book">
+    <main v-else-if="childMode === 'wrongBook'" class="child-wrong-book">
       <div class="child-wrong-heading">
         <div>
           <p class="eyebrow">错题复习</p>
@@ -3742,6 +4287,165 @@ async function runSync() {
         <h2>当前没有待复习错题</h2>
         <p>完成训练后，答错的题会自动进入这里。</p>
       </section>
+    </main>
+
+    <main v-else class="child-word-quiz">
+      <p v-if="wordbookError" class="form-error content-notice" role="alert">
+        {{ wordbookError }}
+      </p>
+
+      <section v-if="wordQuizResults" class="word-result-panel">
+        <p class="eyebrow">本轮完成</p>
+        <h1>
+          答对 {{ wordCorrectCount }} / {{ wordQuizResults.length }}
+        </h1>
+        <p>
+          {{
+            wordCorrectCount === wordQuizResults.length
+              ? '全部答对，很棒！'
+              : '答错的单词已进入你的单词错题本。'
+          }}
+        </p>
+        <button
+          class="primary-button compact"
+          type="button"
+          @click="
+            wordQuizResults = null;
+            activeWordQuiz = null;
+            loadWordQuizzes();
+          "
+        >
+          <RotateCcw :size="17" />
+          返回单词考察
+        </button>
+      </section>
+
+      <section v-else-if="activeWordQuiz && currentWordQuestion" class="word-quiz-panel">
+        <div class="child-wrong-heading">
+          <div>
+            <p class="eyebrow">
+              {{ activeWordQuiz.quiz.direction === 'en_to_zh' ? '英译中' : '中译英' }}
+            </p>
+            <h1>第 {{ wordAnswerIndex + 1 }} / {{ activeWordQuiz.questions.length }} 题</h1>
+          </div>
+          <span>已选 {{ wordAnsweredCount }} 题</span>
+        </div>
+
+        <div class="word-stem">
+          <span>{{ currentWordQuestion.stem }}</span>
+        </div>
+
+        <div class="word-options">
+          <button
+            v-for="option in currentWordQuestion.options"
+            :key="option.key"
+            type="button"
+            :class="{ selected: currentWordSelection === option.key }"
+            @click="selectWordOption(option.key)"
+          >
+            <span class="word-option-key">{{ option.key }}</span>
+            <span>{{ option.text }}</span>
+          </button>
+        </div>
+
+        <div class="word-quiz-actions">
+          <button
+            class="secondary-button"
+            type="button"
+            :disabled="wordAnswerIndex === 0"
+            @click="stepWordQuiz(-1)"
+          >
+            上一题
+          </button>
+          <button
+            v-if="wordAnswerIndex < activeWordQuiz.questions.length - 1"
+            class="primary-button compact no-margin"
+            type="button"
+            @click="stepWordQuiz(1)"
+          >
+            下一题
+          </button>
+          <button
+            v-else
+            class="primary-button compact no-margin"
+            type="button"
+            :disabled="submittingWordQuiz || wordAnsweredCount === 0"
+            @click="handleSubmitWordQuiz"
+          >
+            <Check :size="17" />
+            {{ submittingWordQuiz ? '提交中' : '提交本轮' }}
+          </button>
+        </div>
+      </section>
+
+      <template v-else>
+        <div class="child-wrong-heading">
+          <div>
+            <p class="eyebrow">单词考察</p>
+            <h1>今天要记的英语单词</h1>
+          </div>
+          <span>{{ wordQuizzes.length }} 轮</span>
+        </div>
+
+        <section
+          v-if="wordStats"
+          class="summary-band child-word-summary"
+        >
+          <div>
+            <span>{{ wordStats.totalAnswers }}</span>
+            <small>累计作答</small>
+          </div>
+          <div>
+            <span>{{ wordAccuracyLabel }}</span>
+            <small>正确率</small>
+          </div>
+          <div>
+            <span>{{ wordStats.wrongItems.active }}</span>
+            <small>待巩固单词</small>
+          </div>
+        </section>
+
+        <section v-if="wordQuizzesLoading" class="empty-state">
+          <div class="loader" aria-label="正在加载单词考察" />
+        </section>
+        <section v-else-if="wordQuizzes.length" class="child-task-list">
+          <article
+            v-for="quiz in wordQuizzes"
+            :key="quiz.id"
+            class="word-quiz-card"
+          >
+            <div class="task-heading">
+              <div>
+                <span>
+                  {{ quiz.direction === 'en_to_zh' ? '英译中' : '中译英' }} ·
+                  {{ quiz.questionCount }} 题
+                </span>
+                <h2>{{ quiz.assignedLocalDate }} 的单词考察</h2>
+              </div>
+              <span class="task-status">
+                {{ quiz.status === 'completed' ? '已完成' : '待完成' }}
+              </span>
+            </div>
+            <p v-if="quiz.deliveryMode === 'passport'">
+              已下发到随身设备，也可以在网页端补做，答案会合并统计。
+            </p>
+            <button
+              class="primary-button compact no-margin"
+              type="button"
+              :disabled="quiz.status === 'completed'"
+              @click="openWordQuiz(quiz)"
+            >
+              <Languages :size="17" />
+              {{ quiz.status === 'completed' ? '本轮已完成' : '开始作答' }}
+            </button>
+          </article>
+        </section>
+        <section v-else class="empty-state">
+          <Languages :size="34" />
+          <h2>今天还没有单词考察</h2>
+          <p>家长导入单词本并下发后，题目会出现在这里。</p>
+        </section>
+      </template>
     </main>
   </div>
 </template>

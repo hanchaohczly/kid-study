@@ -2888,3 +2888,145 @@ form input:hover {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* 英语单词考察 */
+
+.word-quiz-card {
+  display: grid;
+  gap: 12px;
+  padding: 22px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.word-quiz-card:last-child {
+  border-bottom: none;
+}
+
+.child-word-quiz,
+.child-word-book {
+  width: min(100% - 48px, 920px);
+  margin: 0 auto;
+  padding: 46px 0 80px;
+}
+
+.child-word-summary {
+  margin-top: 26px;
+}
+
+.word-quiz-panel {
+  margin-top: 26px;
+}
+
+.word-stem {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 132px;
+  margin-top: 28px;
+  padding: 26px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  font-size: clamp(24px, 4vw, 40px);
+  font-weight: 700;
+  text-align: center;
+  word-break: break-word;
+}
+
+.word-options {
+  display: grid;
+  gap: 12px;
+  margin-top: 20px;
+}
+
+.word-options button {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 16px;
+  line-height: 1.45;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease;
+}
+
+.word-options button:hover {
+  border-color: var(--green);
+}
+
+.word-options button.selected {
+  border-color: var(--green);
+  background: var(--green-soft);
+  color: var(--green-dark);
+  font-weight: 600;
+}
+
+.word-option-key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--surface-muted);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.word-options button.selected .word-option-key {
+  background: var(--green);
+  color: #fff;
+}
+
+.word-quiz-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.word-result-panel {
+  margin-top: 40px;
+  padding: 32px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  text-align: center;
+}
+
+.word-result-panel h1 {
+  margin: 8px 0 10px;
+  font-size: clamp(26px, 4vw, 38px);
+}
+
+.word-result-panel p {
+  color: var(--muted);
+}
+
+.word-result-panel button {
+  margin-top: 22px;
+}
+
+@media (max-width: 720px) {
+  .child-word-quiz,
+  .child-word-book {
+    width: min(100% - 32px, 920px);
+    padding: 32px 0 64px;
+  }
+
+  .word-quiz-actions {
+    flex-direction: column-reverse;
+    align-items: stretch;
+  }
+}
+

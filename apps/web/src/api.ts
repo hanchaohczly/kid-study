@@ -291,6 +291,79 @@ export interface WeeklyReport {
   suggestions: string[]
 }
 
+export type WordbookSourceType = 'pdf' | 'docx' | 'text'
+
+export interface WordDraftEntry {
+  word: string
+  phonetic: string
+  partOfSpeech: string
+  meaning: string
+}
+
+export interface Wordbook {
+  id: string
+  name: string
+  fileName: string
+  sourceType: WordbookSourceType
+  status: 'ready_for_review' | 'confirmed'
+  /** 列表接口不返回词条明细 */
+  entries?: WordDraftEntry[]
+  entryCount: number
+  createdAt: string
+  confirmedAt?: string
+}
+
+export type WordQuizDirection = 'en_to_zh' | 'zh_to_en'
+
+export interface WordQuiz {
+  id: string
+  kidId: string
+  wordbookId: string
+  direction: WordQuizDirection
+  deliveryMode: 'passport' | 'web'
+  questionCount: number
+  status: 'assigned' | 'completed'
+  assignedLocalDate: string
+  createdAt: string
+  completedAt?: string
+}
+
+export interface WordQuizQuestion {
+  id: string
+  position: number
+  stem: string
+  options: Array<{ key: 'A' | 'B' | 'C' | 'D'; text: string }>
+  /** 仅 passport（随身设备）模式返回，供设备离线判题 */
+  answerKey?: 'A' | 'B' | 'C' | 'D'
+}
+
+export interface WordStats {
+  totalAnswers: number
+  correctAnswers: number
+  accuracy: number
+  byDirection: Record<
+    WordQuizDirection,
+    { totalAnswers: number; correctAnswers: number; accuracy: number }
+  >
+  wrongItems: { active: number; mastered: number }
+}
+
+export type WordWrongItemStatus = 'active' | 'mastered'
+
+export interface WordWrongItem {
+  id: string
+  entryId: string
+  wordbookId: string
+  word: string
+  phonetic: string
+  meaning: string
+  wrongCount: number
+  correctStreak: number
+  status: WordWrongItemStatus
+  lastWrongAt: string
+  masteredAt?: string
+}
+
 export class ApiError extends Error {
   readonly status: number
   readonly retryable: boolean
@@ -679,5 +752,98 @@ export function requestHint(input: {
   return api('/v1/guide', {
     method: 'POST',
     body: JSON.stringify(input),
+  })
+}
+
+export async function listWordbooks(): Promise<Wordbook[]> {
+  const result = await api<{ wordbooks: Wordbook[] }>('/v1/wordbooks')
+  return result.wordbooks
+}
+
+export async function uploadWordbook(file: File): Promise<Wordbook> {
+  const body = new FormData()
+  body.append('file', file)
+  const result = await api<{ wordbook: Wordbook }>('/v1/wordbooks/upload', {
+    method: 'POST',
+    body,
+  })
+  return result.wordbook
+}
+
+export async function confirmWordbook(id: string): Promise<Wordbook> {
+  const result = await api<{ wordbook: Wordbook }>(
+    `/v1/wordbooks/${id}/confirm`,
+    {
+      method: 'POST',
+      body: JSON.stringify({}),
+    },
+  )
+  return result.wordbook
+}
+
+export function deleteWordbook(id: string): Promise<void> {
+  return api(`/v1/wordbooks/${id}`, { method: 'DELETE' })
+}
+
+export async function createWordQuiz(input: {
+  wordbookId: string
+  direction: WordQuizDirection
+  count: number
+  deliveryMode: 'passport' | 'web'
+}): Promise<{ quiz: WordQuiz; questionCount: number }> {
+  return api('/v1/word-quizzes', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+}
+
+export async function listWordQuizzes(limit = 10): Promise<WordQuiz[]> {
+  const result = await api<{ quizzes: WordQuiz[] }>(
+    `/v1/word-quizzes?limit=${limit}`,
+  )
+  return result.quizzes
+}
+
+export function getWordQuiz(id: string): Promise<{
+  quiz: WordQuiz
+  questions: WordQuizQuestion[]
+}> {
+  return api(`/v1/word-quizzes/${id}`)
+}
+
+export function submitWordAnswers(
+  quizId: string,
+  answers: Array<{ questionId: string; selectedKey: 'A' | 'B' | 'C' | 'D' }>,
+): Promise<{
+  accepted: string[]
+  duplicated: string[]
+  results: Array<{ questionId: string; isCorrect: boolean; answerKey: string }>
+}> {
+  return api(`/v1/word-quizzes/${quizId}/answers`, {
+    method: 'POST',
+    body: JSON.stringify({ answers }),
+  })
+}
+
+export function getWordStats(): Promise<WordStats> {
+  return api('/v1/word-stats')
+}
+
+export async function getWordWrongItems(
+  status?: WordWrongItemStatus,
+): Promise<WordWrongItem[]> {
+  const result = await api<{ items: WordWrongItem[] }>(
+    `/v1/word-wrong-items${status ? `?status=${status}` : ''}`,
+  )
+  return result.items
+}
+
+export function updateWordWrongItem(
+  id: string,
+  status: WordWrongItemStatus,
+): Promise<{ ok: true }> {
+  return api(`/v1/word-wrong-items/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status }),
   })
 }
