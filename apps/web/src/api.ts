@@ -333,8 +333,12 @@ export interface WordQuizQuestion {
   position: number
   stem: string
   options: Array<{ key: 'A' | 'B' | 'C' | 'D'; text: string }>
-  /** 仅 passport（随身设备）模式返回，供设备离线判题 */
-  answerKey?: 'A' | 'B' | 'C' | 'D'
+}
+
+export interface WordQuizProgress {
+  questionId: string
+  selectedKey: 'A' | 'B' | 'C' | 'D'
+  isCorrect: boolean
 }
 
 export interface WordStats {
@@ -781,6 +785,18 @@ export async function confirmWordbook(id: string): Promise<Wordbook> {
   return result.wordbook
 }
 
+export async function getWordbook(id: string): Promise<Wordbook> {
+  const result = await api<{ wordbook: Wordbook }>(`/v1/wordbooks/${id}`)
+  return result.wordbook
+}
+
+export async function updateWordbook(id: string, entries: WordDraftEntry[]): Promise<Wordbook> {
+  const result = await api<{ wordbook: Wordbook }>(`/v1/wordbooks/${id}`, {
+    method: 'PATCH', body: JSON.stringify({ entries }),
+  })
+  return result.wordbook
+}
+
 export function deleteWordbook(id: string): Promise<void> {
   return api(`/v1/wordbooks/${id}`, { method: 'DELETE' })
 }
@@ -807,6 +823,7 @@ export async function listWordQuizzes(limit = 10): Promise<WordQuiz[]> {
 export function getWordQuiz(id: string): Promise<{
   quiz: WordQuiz
   questions: WordQuizQuestion[]
+  progress: WordQuizProgress[]
 }> {
   return api(`/v1/word-quizzes/${id}`)
 }
@@ -817,7 +834,9 @@ export function submitWordAnswers(
 ): Promise<{
   accepted: string[]
   duplicated: string[]
-  results: Array<{ questionId: string; isCorrect: boolean; answerKey: string }>
+  completed: boolean
+  answeredCount: number
+  results: WordQuizProgress[]
 }> {
   return api(`/v1/word-quizzes/${quizId}/answers`, {
     method: 'POST',

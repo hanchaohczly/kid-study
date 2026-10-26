@@ -1299,20 +1299,42 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
           request.authContext.familyId,
           quiz.id,
         )
-        // 随身设备离线作答时需要答案，仅 passport 模式返回
-        const withAnswers = quiz.deliveryMode === 'passport'
+        const progress = await wordbookService.quizProgress(request.authContext.familyId, quiz.id)
         return {
           quiz,
+          progress,
           questions: questions.map((question) => ({
             id: question.id,
             position: question.position,
             stem: question.stem,
             options: question.options,
-            ...(withAnswers ? { answerKey: question.answerKey } : {}),
           })),
         }
       } catch (error) {
         return wordbookError(error, reply, request.id)
+      }
+    },
+  )
+
+  app.get(
+    '/v1/passport/word-training',
+    { preHandler: authenticate },
+    async (request, reply) => {
+      const { familyId, kidId, role } = request.authContext
+      if (role !== 'child' || !kidId) return notFound(reply, request.id)
+      const quizzes = await wordbookService.listQuizzes(familyId, kidId, 200)
+      const quiz = quizzes.filter((item) => item.deliveryMode === 'passport' && item.status === 'assigned')
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0]
+      if (!quiz) return { quiz: null, questions: [] }
+      const progress = await wordbookService.quizProgress(familyId, quiz.id)
+      const answered = new Set(progress.map((item) => item.questionId))
+      const questions = await wordbookService.listQuizQuestions(familyId, quiz.id)
+      // 8 题一批，兼容设备缓存和 24KB 响应限制；完成后继续取下一批。
+      return {
+        quiz: { id: quiz.id, assignedLocalDate: quiz.assignedLocalDate, questionCount: quiz.questionCount },
+        remainingCount: questions.length - answered.size,
+        questions: questions.filter((item) => !answered.has(item.id)).slice(0, 8)
+          .map(({ id, stem, options }) => ({ id, stem, options })),
       }
     },
   )
@@ -1930,6 +1952,11 @@ function wordbookError(
     string,
     { status: number; message: string; retryable: boolean }
   > = {
+    WORD_ANSWER_EVENT_CONFLICT: {
+      status: 409,
+      message: '作答事件 ID 已用于其他答案，请使用原始作答记录重试',
+      retryable: false,
+    },
     WORDBOOK_NO_ENTRIES: {
       status: 422,
       message:
@@ -1948,7 +1975,7 @@ function wordbookError(
     },
     WORDBOOK_TOO_SMALL: {
       status: 409,
-      message: '单词本至少需要 4 个释义互不相同的词条才能出选择题',
+      message: '至少需要 4 个展示内容可区分的选项，且题干不能对应多个答案；请校对重复或过长的词条',
       retryable: false,
     },
     INVALID_PDF: {

@@ -61,6 +61,7 @@ import {
   getTodayTraining,
   getWeeklyReport,
   getWordQuiz,
+  getWordbook,
   getWordStats,
   getWordWrongItems,
   getWrongItems,
@@ -75,6 +76,7 @@ import {
   submitMasteryReview,
   submitWordAnswers,
   updateWordWrongItem,
+  updateWordbook,
   updateWrongItem,
   uploadTextbook,
   uploadWordbook,
@@ -98,6 +100,7 @@ import {
   type WordQuiz,
   type WordQuizDirection,
   type WordQuizQuestion,
+  type WordQuizProgress,
   type WordStats,
   type WordWrongItem,
   type WordWrongItemStatus,
@@ -200,6 +203,9 @@ const wordbookInput = ref<HTMLInputElement | null>(null)
 const uploadingWordbook = ref(false)
 const confirmingWordbookId = ref('')
 const deletingWordbookId = ref('')
+const reviewingWordbook = ref<Wordbook | null>(null)
+const loadingWordbookId = ref('')
+const savingWordbook = ref(false)
 const wordbookMessage = ref('')
 const wordbookError = ref('')
 const wordQuizBookId = ref('')
@@ -212,12 +218,14 @@ const wordQuizzesLoading = ref(false)
 const activeWordQuiz = ref<{
   quiz: WordQuiz
   questions: WordQuizQuestion[]
+  progress: WordQuizProgress[]
 } | null>(null)
 const wordAnswerIndex = ref(0)
 const wordAnswers = ref<Record<string, 'A' | 'B' | 'C' | 'D'>>({})
 const wordQuizResults = ref<
-  Array<{ questionId: string; isCorrect: boolean; answerKey: string }> | null
+  WordQuizProgress[] | null
 >(null)
+const openingWordQuizId = ref('')
 const submittingWordQuiz = ref(false)
 const wordStats = ref<WordStats | null>(null)
 const wordWrongItems = ref<WordWrongItem[]>([])
@@ -727,7 +735,11 @@ async function handleConfirmWordbook(wordbook: Wordbook) {
   confirmingWordbookId.value = wordbook.id
   wordbookError.value = ''
   try {
+    if (reviewingWordbook.value?.id === wordbook.id) {
+      await updateWordbook(wordbook.id, reviewingWordbook.value.entries ?? [])
+    }
     await confirmWordbook(wordbook.id)
+    reviewingWordbook.value = null
     wordbookMessage.value = '单词本已确认，可以下发考察'
     await loadWordbooks()
     wordQuizBookId.value = wordbook.id
@@ -739,11 +751,40 @@ async function handleConfirmWordbook(wordbook: Wordbook) {
   }
 }
 
+async function openWordbookReview(wordbook: Wordbook) {
+  loadingWordbookId.value = wordbook.id
+  wordbookError.value = ''
+  try {
+    reviewingWordbook.value = await getWordbook(wordbook.id)
+  } catch (error) {
+    wordbookError.value = error instanceof Error ? error.message : '词条加载失败'
+  } finally {
+    loadingWordbookId.value = ''
+  }
+}
+
+async function saveWordbookReview() {
+  const book = reviewingWordbook.value
+  if (!book || savingWordbook.value) return
+  savingWordbook.value = true
+  wordbookError.value = ''
+  try {
+    reviewingWordbook.value = await updateWordbook(book.id, book.entries ?? [])
+    wordbookMessage.value = '词条校对已保存'
+    await loadWordbooks()
+  } catch (error) {
+    wordbookError.value = error instanceof Error ? error.message : '词条保存失败'
+  } finally {
+    savingWordbook.value = false
+  }
+}
+
 async function handleDeleteWordbook(wordbook: Wordbook) {
   deletingWordbookId.value = wordbook.id
   wordbookError.value = ''
   try {
     await deleteWordbook(wordbook.id)
+    if (reviewingWordbook.value?.id === wordbook.id) reviewingWordbook.value = null
     if (wordQuizBookId.value === wordbook.id) wordQuizBookId.value = ''
     wordbookMessage.value = '单词本已删除'
     await loadWordbooks()
@@ -769,7 +810,7 @@ async function handleCreateWordQuiz() {
     })
     wordbookMessage.value =
       wordQuizDeliveryMode.value === 'passport'
-        ? `已下发 ${result.questionCount} 道单词题到随身设备`
+        ? `已安排 ${result.questionCount} 道单词题，随身设备联网刷新后获取`
         : `已生成 ${result.questionCount} 道单词题，可在网页端作答`
   } catch (error) {
     wordbookError.value =
@@ -792,23 +833,46 @@ async function loadWordQuizzes() {
 }
 
 async function openWordQuiz(quiz: WordQuiz) {
+  if (openingWordQuizId.value) return
+  openingWordQuizId.value = quiz.id
   wordbookError.value = ''
   wordQuizResults.value = null
   try {
     const detail = await getWordQuiz(quiz.id)
     activeWordQuiz.value = detail
-    wordAnswerIndex.value = 0
-    wordAnswers.value = {}
+    let draft: Record<string, unknown> = {}
+    try { draft = JSON.parse(localStorage.getItem(`word-quiz:${quiz.id}`) ?? '{}') ?? {} } catch { /* 忽略损坏的草稿 */ }
+    const restored: Record<string, 'A' | 'B' | 'C' | 'D'> = {}
+    for (const question of detail.questions) {
+      const key = draft[question.id]
+      if (key === 'A' || key === 'B' || key === 'C' || key === 'D') restored[question.id] = key
+    }
+    for (const answer of detail.progress) restored[answer.questionId] = answer.selectedKey
+    wordAnswers.value = restored
+    const index = detail.questions.findIndex((question) => !restored[question.id])
+    wordAnswerIndex.value = Math.max(index, 0)
+    if (detail.quiz.status === 'completed' ||
+      (detail.questions.length > 0 && detail.progress.length === detail.questions.length)) {
+      wordQuizResults.value = detail.progress
+    }
   } catch (error) {
     wordbookError.value =
       error instanceof Error ? error.message : '题目加载失败'
+  } finally {
+    openingWordQuizId.value = ''
   }
 }
 
 function selectWordOption(key: 'A' | 'B' | 'C' | 'D') {
   const question = activeWordQuiz.value?.questions[wordAnswerIndex.value]
   if (!question) return
+  if (submittingWordQuiz.value || activeWordQuiz.value?.progress.some((item) => item.questionId === question.id)) return
   wordAnswers.value = { ...wordAnswers.value, [question.id]: key }
+  try {
+    localStorage.setItem(`word-quiz:${activeWordQuiz.value!.quiz.id}`, JSON.stringify(wordAnswers.value))
+  } catch {
+    wordbookError.value = '浏览器无法保存草稿，请完成本轮后提交'
+  }
 }
 
 function stepWordQuiz(delta: number) {
@@ -820,8 +884,13 @@ function stepWordQuiz(delta: number) {
 
 async function handleSubmitWordQuiz() {
   const quiz = activeWordQuiz.value
-  if (!quiz) return
-  const answers = Object.entries(wordAnswers.value).map(
+  if (!quiz || submittingWordQuiz.value) return
+  if (quiz.questions.some((question) => !wordAnswers.value[question.id])) {
+    wordbookError.value = '请先完成所有题目，再提交本轮'
+    return
+  }
+  const persistedIds = new Set(quiz.progress.map((item) => item.questionId))
+  const answers = Object.entries(wordAnswers.value).filter(([id]) => !persistedIds.has(id)).map(
     ([questionId, selectedKey]) => ({ questionId, selectedKey }),
   )
   if (!answers.length) return
@@ -829,7 +898,13 @@ async function handleSubmitWordQuiz() {
   wordbookError.value = ''
   try {
     const result = await submitWordAnswers(quiz.quiz.id, answers)
-    wordQuizResults.value = result.results
+    quiz.progress = result.results
+    if (result.completed) {
+      wordQuizResults.value = result.results
+      try { localStorage.removeItem(`word-quiz:${quiz.quiz.id}`) } catch { /* 已保存到服务端 */ }
+    } else {
+      wordbookError.value = `已保存 ${result.answeredCount} 题，请继续完成本轮`
+    }
     await Promise.all([loadWordStats(), loadWordWrongItems()])
   } catch (error) {
     wordbookError.value =
@@ -3282,18 +3357,23 @@ async function runSync() {
               </div>
               <p>{{ book.entryCount }} 个词条 · {{ book.fileName }}</p>
               <div class="wrong-item-actions">
+                <button class="secondary-button compact" type="button"
+                  :disabled="Boolean(loadingWordbookId)"
+                  @click="openWordbookReview(book)">
+                  {{ loadingWordbookId === book.id ? '加载词条中' : book.status === 'confirmed' ? '查看词条' : '预览并校对' }}
+                </button>
                 <button
-                  v-if="book.status !== 'confirmed'"
+                  v-if="book.status !== 'confirmed' && reviewingWordbook?.id === book.id"
                   class="primary-button compact no-margin"
                   type="button"
-                  :disabled="confirmingWordbookId === book.id"
+                  :disabled="confirmingWordbookId === book.id || savingWordbook"
                   @click="handleConfirmWordbook(book)"
                 >
                   <Check :size="16" />
-                  {{ confirmingWordbookId === book.id ? '确认中' : '确认词本' }}
+                  {{ confirmingWordbookId === book.id ? '确认中' : '保存并确认词本' }}
                 </button>
                 <button
-                  v-else
+                  v-else-if="book.status === 'confirmed'"
                   class="ghost-button compact no-margin"
                   type="button"
                   @click="wordQuizBookId = book.id"
@@ -3311,6 +3391,36 @@ async function runSync() {
                   <Trash2 :size="16" />
                 </button>
               </div>
+              <section v-if="reviewingWordbook?.id === book.id" class="wordbook-review">
+                <p>共 {{ reviewingWordbook.entries?.length ?? 0 }} 个词条。请核对英文、音标、词性与释义。</p>
+                <div class="wordbook-review-table">
+                  <table>
+                    <thead><tr><th>英文</th><th>音标</th><th>词性</th><th>中文释义</th><th>操作</th></tr></thead>
+                    <tbody>
+                      <tr v-for="(entry, index) in reviewingWordbook.entries" :key="index">
+                        <td><input v-model="entry.word" aria-label="英文" maxlength="80" :disabled="book.status === 'confirmed' || savingWordbook || Boolean(confirmingWordbookId)" /></td>
+                        <td><input v-model="entry.phonetic" aria-label="音标" maxlength="60" :disabled="book.status === 'confirmed' || savingWordbook || Boolean(confirmingWordbookId)" /></td>
+                        <td><input v-model="entry.partOfSpeech" aria-label="词性" maxlength="20" :disabled="book.status === 'confirmed' || savingWordbook || Boolean(confirmingWordbookId)" /></td>
+                        <td><textarea v-model="entry.meaning" aria-label="中文释义" maxlength="300" :disabled="book.status === 'confirmed' || savingWordbook || Boolean(confirmingWordbookId)" /></td>
+                        <td><button v-if="book.status !== 'confirmed'" class="icon-button" type="button" title="删除词条"
+                          :disabled="savingWordbook || Boolean(confirmingWordbookId)"
+                          @click="reviewingWordbook.entries?.splice(index, 1)"><X :size="16" /></button></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div class="wrong-item-actions">
+                  <button v-if="book.status !== 'confirmed'" class="secondary-button" type="button"
+                    :disabled="savingWordbook || Boolean(confirmingWordbookId) || (reviewingWordbook.entries?.length ?? 0) >= 2000"
+                    @click="reviewingWordbook.entries?.push({ word: '', phonetic: '', partOfSpeech: '', meaning: '' })">添加词条</button>
+                  <button v-if="book.status !== 'confirmed'" class="primary-button compact no-margin" type="button"
+                    :disabled="savingWordbook || Boolean(confirmingWordbookId)" @click="saveWordbookReview">
+                    {{ savingWordbook ? '保存中' : '保存校对' }}
+                  </button>
+                  <button class="ghost-button" type="button" :disabled="savingWordbook || Boolean(confirmingWordbookId)"
+                    @click="reviewingWordbook = null">收起</button>
+                </div>
+              </section>
             </article>
           </div>
           <section v-else class="empty-state compact-empty">
@@ -3325,7 +3435,7 @@ async function runSync() {
             <div>
               <p class="eyebrow">下发考察</p>
               <h2>用选择题考察单词掌握</h2>
-              <p>题目由词表本地生成，不依赖大模型，可离线在随身设备完成。</p>
+              <p>题目由词表自动生成。随身设备联网获取后可离线作答，联网后同步评分。</p>
             </div>
           </div>
           <div class="assessment-filters">
@@ -4341,6 +4451,7 @@ async function runSync() {
             :key="option.key"
             type="button"
             :class="{ selected: currentWordSelection === option.key }"
+            :disabled="submittingWordQuiz || activeWordQuiz.progress.some((item) => item.questionId === currentWordQuestion?.id)"
             @click="selectWordOption(option.key)"
           >
             <span class="word-option-key">{{ option.key }}</span>
@@ -4369,7 +4480,7 @@ async function runSync() {
             v-else
             class="primary-button compact no-margin"
             type="button"
-            :disabled="submittingWordQuiz || wordAnsweredCount === 0"
+            :disabled="submittingWordQuiz || wordAnsweredCount !== activeWordQuiz.questions.length"
             @click="handleSubmitWordQuiz"
           >
             <Check :size="17" />
@@ -4432,11 +4543,11 @@ async function runSync() {
             <button
               class="primary-button compact no-margin"
               type="button"
-              :disabled="quiz.status === 'completed'"
+              :disabled="Boolean(openingWordQuizId)"
               @click="openWordQuiz(quiz)"
             >
               <Languages :size="17" />
-              {{ quiz.status === 'completed' ? '本轮已完成' : '开始作答' }}
+              {{ openingWordQuizId === quiz.id ? '正在加载' : quiz.status === 'completed' ? '查看结果' : '开始或继续作答' }}
             </button>
           </article>
         </section>

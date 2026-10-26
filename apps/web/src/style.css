@@ -3017,6 +3017,30 @@ form input:hover {
   margin-top: 22px;
 }
 
+.wordbook-review-table {
+  max-height: 420px;
+  overflow: auto;
+  margin: 16px 0;
+}
+
+.wordbook-review table {
+  width: 100%;
+  min-width: 650px;
+  border-collapse: collapse;
+}
+
+.wordbook-review th,
+.wordbook-review td {
+  padding: 8px;
+  text-align: left;
+}
+
+.wordbook-review input,
+.wordbook-review textarea {
+  width: 100%;
+  min-width: 90px;
+}
+
 @media (max-width: 720px) {
   .child-word-quiz,
   .child-word-book {
@@ -3029,4 +3053,3 @@ form input:hover {
     align-items: stretch;
   }
 }
-

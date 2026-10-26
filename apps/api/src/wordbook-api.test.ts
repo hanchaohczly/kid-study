@@ -62,6 +62,52 @@ async function login(
 }
 
 describe('wordbook API', () => {
+  it('delivers fifty questions in bounded batches and resumes only unanswered questions', async () => {
+    const { app, wordbookService } = await createApp()
+    const parentCookie = await login(app, 'parent')
+    const childCookie = await login(app, 'child')
+    const seeded = await wordbookService.import({
+      familyId, createdBy: parentId, fileName: 'fifty.txt', sourceType: 'text',
+      text: Array.from({ length: 50 }, (_, i) =>
+        `word${String.fromCharCode(97 + Math.floor(i / 26), 97 + i % 26)} 词义${i}`,
+      ).join('\n'),
+    })
+    await wordbookService.confirm({ familyId, createdBy: parentId, id: seeded.id })
+    const created = await app.inject({
+      method: 'POST', url: '/v1/word-quizzes',
+      cookies: { kid_study_session: parentCookie },
+      payload: { wordbookId: seeded.id, direction: 'en_to_zh', count: 50, deliveryMode: 'passport' },
+    })
+    expect(created.statusCode).toBe(201)
+    const quizId = created.json().quiz.id
+    const seen = new Set<string>()
+    for (let round = 0; round < 7; round++) {
+      const fetched = await app.inject({
+        method: 'GET', url: '/v1/passport/word-training',
+        cookies: { kid_study_session: childCookie },
+      })
+      const batch = fetched.json().questions as Array<{ id: string }>
+      expect(batch.length).toBeGreaterThan(0)
+      expect(batch.length).toBeLessThanOrEqual(8)
+      expect(Buffer.byteLength(fetched.body)).toBeLessThan(24 * 1024)
+      expect(fetched.body).not.toContain('answerKey')
+      for (const question of batch) {
+        expect(seen.has(question.id)).toBe(false)
+        seen.add(question.id)
+      }
+      const submitted = await app.inject({
+        method: 'POST', url: `/v1/word-quizzes/${quizId}/answers`,
+        cookies: { kid_study_session: childCookie },
+        payload: { answers: batch.map(({ id }) => ({
+          questionId: id, selectedKey: 'A', clientEventId: `device-${id}`,
+        })) },
+      })
+      expect(submitted.statusCode).toBe(200)
+      expect(submitted.json().completed).toBe(round === 6)
+    }
+    expect(seen.size).toBe(50)
+  })
+
   it('runs the full import, confirm, quiz and answer flow', async () => {
     const { app, wordbookService } = await createApp()
     const parentCookie = await login(app, 'parent')
@@ -110,7 +156,15 @@ describe('wordbook API', () => {
       options: Array<{ key: string; text: string }>
     }>
     expect(questions).toHaveLength(3)
-    expect(questions.every((question) => question.answerKey)).toBe(true)
+    expect(questions.every((question) => !('answerKey' in question))).toBe(true)
+    expect(fetched.json().progress).toEqual([])
+    const passport = await app.inject({
+      method: 'GET', url: '/v1/passport/word-training',
+      cookies: { kid_study_session: childCookie },
+    })
+    expect(passport.statusCode).toBe(200)
+    expect(passport.json().quiz.id).toBe(quizId)
+    expect(passport.body).not.toContain('answerKey')
 
     const submitted = await app.inject({
       method: 'POST',
@@ -127,6 +181,18 @@ describe('wordbook API', () => {
     expect(submitted.statusCode).toBe(200)
     expect(submitted.json().accepted).toHaveLength(3)
     expect(submitted.json().results).toHaveLength(3)
+    expect(submitted.json().completed).toBe(true)
+    const restored = await app.inject({
+      method: 'GET', url: `/v1/word-quizzes/${quizId}`,
+      cookies: { kid_study_session: childCookie },
+    })
+    expect(restored.json().progress).toHaveLength(3)
+    expect(restored.json().quiz.status).toBe('completed')
+    const emptyPassport = await app.inject({
+      method: 'GET', url: '/v1/passport/word-training',
+      cookies: { kid_study_session: childCookie },
+    })
+    expect(emptyPassport.json().quiz).toBeNull()
 
     const stats = await app.inject({
       method: 'GET',

@@ -17,6 +17,47 @@ export class InMemoryWordbookRepository implements WordbookRepository {
   private readonly questions = new Map<string, WordQuizQuestion[]>()
   private readonly answers = new Map<string, StoredWordAnswer[]>()
   private readonly wrongItems = new Map<string, WordWrongItem>()
+  private commitQueue: Promise<void> = Promise.resolve()
+
+  async listQuizAnswers(familyId: string, quizId: string): Promise<StoredWordAnswer[]> {
+    return (this.answers.get(scoped(familyId, quizId)) ?? []).map((item) => ({ ...item }))
+  }
+
+  async commitAnswers(
+    quiz: WordQuiz, questions: WordQuizQuestion[], answers: StoredWordAnswer[], at: string,
+  ): Promise<{ inserted: StoredWordAnswer[]; answers: StoredWordAnswer[] }> {
+    const previous = this.commitQueue
+    let release!: () => void
+    this.commitQueue = new Promise<void>((resolve) => { release = resolve })
+    await previous
+    const savedAnswers = new Map(this.answers)
+    const savedWrong = new Map(this.wrongItems)
+    const savedQuizzes = new Map(this.quizzes)
+    try {
+      const inserted = await this.saveAnswers(quiz.familyId, answers)
+      for (const answer of inserted) {
+        const question = questions.find((item) => item.id === answer.questionId)!
+        if (answer.isCorrect) {
+          await this.recordCorrect(quiz.familyId, quiz.kidId, question.entryId, at)
+        } else {
+          await this.recordWrong(quiz.familyId, quiz.kidId, question.entryId, quiz.wordbookId, at)
+        }
+      }
+      const persisted = await this.listQuizAnswers(quiz.familyId, quiz.id)
+      if (persisted.length >= questions.length) await this.completeQuiz(quiz.familyId, quiz.id, at)
+      return { inserted, answers: persisted }
+    } catch (error) {
+      this.answers.clear()
+      this.wrongItems.clear()
+      this.quizzes.clear()
+      for (const [key, value] of savedAnswers) this.answers.set(key, value)
+      for (const [key, value] of savedWrong) this.wrongItems.set(key, value)
+      for (const [key, value] of savedQuizzes) this.quizzes.set(key, value)
+      throw error
+    } finally {
+      release()
+    }
+  }
 
   async saveWordbook(item: Wordbook): Promise<void> {
     this.wordbooks.set(scoped(item.familyId, item.id), { ...item })
@@ -108,7 +149,22 @@ export class InMemoryWordbookRepository implements WordbookRepository {
     const key = scoped(familyId, answers[0]?.quizId ?? '')
     const existing = this.answers.get(key) ?? []
     const seen = new Set(existing.map((item) => item.questionId))
-    const inserted = answers.filter((item) => !seen.has(item.questionId))
+    const events = new Map(
+      [...this.answers.values()].flat().filter((item) => item.familyId === familyId && item.clientEventId)
+        .map((item) => [item.clientEventId!, item]),
+    )
+    const inserted: StoredWordAnswer[] = []
+    for (const item of answers) {
+      const event = item.clientEventId ? events.get(item.clientEventId) : undefined
+      if (event && (event.quizId !== item.quizId || event.questionId !== item.questionId ||
+        event.selectedKey !== item.selectedKey || event.kidId !== item.kidId)) {
+        throw new Error('WORD_ANSWER_EVENT_CONFLICT')
+      }
+      if (seen.has(item.questionId)) continue
+      seen.add(item.questionId)
+      inserted.push(item)
+      if (item.clientEventId) events.set(item.clientEventId, item)
+    }
     this.answers.set(key, [...existing, ...inserted.map((item) => ({ ...item }))])
     return inserted
   }
@@ -124,7 +180,7 @@ export class InMemoryWordbookRepository implements WordbookRepository {
   ): Promise<void> {
     const key = scoped(familyId, quizId)
     const quiz = this.quizzes.get(key)
-    if (quiz) this.quizzes.set(key, { ...quiz, status: 'completed', completedAt: at })
+    if (quiz) this.quizzes.set(key, { ...quiz, status: 'completed', completedAt: quiz.completedAt ?? at })
   }
 
   async listAnswerRecords(
@@ -166,7 +222,7 @@ export class InMemoryWordbookRepository implements WordbookRepository {
     wordbookId: string,
     at: string,
   ): Promise<void> {
-    const key = scoped(familyId, entryId)
+    const key = scoped(familyId, `${kidId}:${entryId}`)
     const entry = this.findEntry(familyId, entryId)
     const existing = this.wrongItems.get(key)
     this.wrongItems.set(key, {
@@ -191,7 +247,7 @@ export class InMemoryWordbookRepository implements WordbookRepository {
     entryId: string,
     at: string,
   ): Promise<void> {
-    const key = scoped(familyId, entryId)
+    const key = scoped(familyId, `${kidId}:${entryId}`)
     const existing = this.wrongItems.get(key)
     if (!existing || existing.status !== 'active') return
     const streak = existing.correctStreak + 1

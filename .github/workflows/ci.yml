@@ -26,7 +26,14 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
-      - run: bash scripts/validate-migrations.sh
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build --workspace @kid-study/contracts
+      - run: WORDBOOK_TEST_PORT=55432 bash scripts/validate-migrations.sh
+      - run: bash scripts/validate-wordbook-upgrade.sh
 
   android:
     runs-on: ubuntu-latest

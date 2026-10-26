@@ -1,4 +1,4 @@
-import { Pool } from 'pg'
+import { Pool, type PoolClient } from 'pg'
 import type {
   StoredWordAnswer,
   StoredWordEntry,
@@ -99,6 +99,60 @@ export class PostgresWordbookRepository implements WordbookRepository {
 
   constructor(connectionString: string) {
     this.pool = new Pool({ connectionString, max: 4 })
+  }
+
+  async listQuizAnswers(
+    familyId: string, quizId: string, client?: PoolClient,
+  ): Promise<StoredWordAnswer[]> {
+    const result = await (client ?? this.pool).query<WordAnswerRecordRow>(
+      `select * from word_quiz_answer where family_id = $1 and quiz_id = $2 order by answered_at, id`,
+      [familyId, quizId],
+    )
+    return result.rows.map((row) => ({
+      id: row.id, familyId: row.family_id, quizId: row.quiz_id,
+      questionId: row.question_id, kidId: row.kid_id, selectedKey: row.selected_key,
+      isCorrect: row.is_correct, answeredAt: row.answered_at.toISOString(),
+      ...(row.client_event_id ? { clientEventId: row.client_event_id } : {}),
+    }))
+  }
+
+  async commitAnswers(
+    quiz: WordQuiz, questions: WordQuizQuestion[], answers: StoredWordAnswer[], at: string,
+  ): Promise<{ inserted: StoredWordAnswer[]; answers: StoredWordAnswer[] }> {
+    const client = await this.pool.connect()
+    try {
+      await client.query('begin')
+      // 事件 ID 在家庭范围唯一；锁也覆盖同家庭不同考察的并发重放。
+      await client.query('select pg_advisory_xact_lock(hashtextextended($1, 0))', [quiz.familyId])
+      const locked = await client.query(
+        'select id from word_quiz where family_id = $1 and id = $2 for update',
+        [quiz.familyId, quiz.id],
+      )
+      if (!locked.rowCount) throw new Error('WORD_QUIZ_NOT_FOUND')
+      const inserted = await this.saveAnswers(quiz.familyId, answers, client)
+      for (const answer of inserted) {
+        const question = questions.find((item) => item.id === answer.questionId)!
+        if (answer.isCorrect) {
+          await this.recordCorrect(quiz.familyId, quiz.kidId, question.entryId, at, client)
+        } else {
+          await this.recordWrong(quiz.familyId, quiz.kidId, question.entryId, quiz.wordbookId, at, client)
+        }
+      }
+      const persisted = await this.listQuizAnswers(quiz.familyId, quiz.id, client)
+      if (persisted.length >= questions.length) {
+        await client.query(
+          `update word_quiz set status = 'completed', completed_at = coalesce(completed_at, $3)
+           where family_id = $1 and id = $2`, [quiz.familyId, quiz.id, at],
+        )
+      }
+      await client.query('commit')
+      return { inserted, answers: persisted }
+    } catch (error) {
+      await client.query('rollback')
+      throw error
+    } finally {
+      client.release()
+    }
   }
 
   async saveWordbook(item: Wordbook): Promise<void> {
@@ -317,10 +371,22 @@ export class PostgresWordbookRepository implements WordbookRepository {
   async saveAnswers(
     familyId: string,
     answers: StoredWordAnswer[],
+    client?: PoolClient,
   ): Promise<StoredWordAnswer[]> {
     const inserted: StoredWordAnswer[] = []
     for (const answer of answers) {
-      const result = await this.pool.query(
+      if (answer.clientEventId) {
+        const event = await (client ?? this.pool).query<WordAnswerRecordRow>(
+          'select * from word_quiz_answer where family_id = $1 and client_event_id = $2',
+          [familyId, answer.clientEventId],
+        )
+        const row = event.rows[0]
+        if (row && (row.quiz_id !== answer.quizId || row.question_id !== answer.questionId ||
+          row.selected_key !== answer.selectedKey || row.kid_id !== answer.kidId)) {
+          throw new Error('WORD_ANSWER_EVENT_CONFLICT')
+        }
+      }
+      const result = await (client ?? this.pool).query(
         `insert into word_quiz_answer (
            id, family_id, quiz_id, question_id, kid_id, selected_key,
            is_correct, client_event_id, answered_at
@@ -410,8 +476,9 @@ export class PostgresWordbookRepository implements WordbookRepository {
     entryId: string,
     wordbookId: string,
     at: string,
+    client?: PoolClient,
   ): Promise<void> {
-    const entry = await this.pool.query<WordEntryRow>(
+    const entry = await (client ?? this.pool).query<WordEntryRow>(
       `select id, family_id, wordbook_id, word, normalized_word, phonetic,
               part_of_speech, meaning, position
          from word_entry
@@ -420,7 +487,7 @@ export class PostgresWordbookRepository implements WordbookRepository {
     )
     const row = entry.rows[0]
     if (!row) return
-    await this.pool.query(
+    await (client ?? this.pool).query(
       `insert into word_wrong_item (
          id, family_id, kid_id, entry_id, wordbook_id, wrong_count,
          correct_streak, status, last_wrong_at
@@ -440,8 +507,9 @@ export class PostgresWordbookRepository implements WordbookRepository {
     kidId: string,
     entryId: string,
     at: string,
+    client?: PoolClient,
   ): Promise<void> {
-    await this.pool.query(
+    await (client ?? this.pool).query(
       `update word_wrong_item
           set correct_streak = correct_streak + 1,
               status = case

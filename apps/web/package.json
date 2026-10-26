@@ -12,15 +12,17 @@
   },
   "dependencies": {
     "@kid-study/contracts": "*",
-    "dexie": "^4.2.1",
     "@lucide/vue": "^1.0.0",
+    "dexie": "^4.2.1",
     "vue": "^3.5.42"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",
     "@vitejs/plugin-vue": "^6.0.8",
+    "@vue/test-utils": "^2.5.1",
     "@vue/tsconfig": "^0.9.1",
     "fake-indexeddb": "^6.2.4",
+    "happy-dom": "^21.0.4",
     "typescript": "~6.0.2",
     "vite": "^8.3.0",
     "vite-plugin-pwa": "^2.0.0",

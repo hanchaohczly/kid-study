@@ -121,6 +121,13 @@ export interface WordWrongItem {
 }
 
 export interface WordbookRepository {
+  commitAnswers(
+    quiz: WordQuiz,
+    questions: WordQuizQuestion[],
+    answers: StoredWordAnswer[],
+    at: string,
+  ): Promise<{ inserted: StoredWordAnswer[]; answers: StoredWordAnswer[] }>
+  listQuizAnswers(familyId: string, quizId: string): Promise<StoredWordAnswer[]>
   saveWordbook(item: Wordbook): Promise<void>
   getWordbook(familyId: string, id: string): Promise<Wordbook | undefined>
   listWordbooks(familyId: string): Promise<Wordbook[]>
@@ -435,6 +442,7 @@ export class WordbookService {
       createdAt: (input.now ?? new Date()).toISOString(),
     }
     const questions = buildQuestions(quiz, entries)
+    quiz.questionCount = questions.length
     await this.repository.saveQuiz(quiz, questions)
     return { quiz, questions }
   }
@@ -471,7 +479,9 @@ export class WordbookService {
   }): Promise<{
     accepted: string[]
     duplicated: string[]
-    results: Array<{ questionId: string; isCorrect: boolean; answerKey: string }>
+    completed: boolean
+    answeredCount: number
+    results: Array<{ questionId: string; selectedKey: OptionKey; isCorrect: boolean }>
   }> {
     const quiz = await this.getQuiz(input.familyId, input.quizId, input.kidId)
     const questions = await this.repository.listQuizQuestions(
@@ -500,50 +510,36 @@ export class WordbookService {
       })
     }
 
-    const inserted = await this.repository.saveAnswers(input.familyId, results)
+    const { inserted, answers: persisted } = await this.repository.commitAnswers(
+      quiz, questions, results, now,
+    )
     const insertedIds = new Set(inserted.map((item) => item.questionId))
     const duplicated = results
-      .filter((item) => !insertedIds.has(item.questionId))
+      .filter((item) => {
+        if (!insertedIds.has(item.questionId)) return true
+        insertedIds.delete(item.questionId)
+        return false
+      })
       .map((item) => item.questionId)
-
-    for (const answer of inserted) {
-      const question = byId.get(answer.questionId)
-      if (!question) continue
-      if (answer.isCorrect) {
-        await this.repository.recordCorrect(
-          input.familyId,
-          input.kidId,
-          question.entryId,
-          now,
-        )
-      } else {
-        await this.repository.recordWrong(
-          input.familyId,
-          input.kidId,
-          question.entryId,
-          quiz.wordbookId,
-          now,
-        )
-      }
-    }
-
-    const answered = await this.repository.countAnswers(
-      input.familyId,
-      quiz.id,
-    )
-    if (answered >= questions.length) {
-      await this.repository.completeQuiz(input.familyId, quiz.id, now)
-    }
 
     return {
       accepted: inserted.map((item) => item.questionId),
       duplicated,
-      results: results.map((item) => ({
+      completed: persisted.length >= questions.length,
+      answeredCount: persisted.length,
+      results: persisted.map((item) => ({
         questionId: item.questionId,
+        selectedKey: item.selectedKey,
         isCorrect: item.isCorrect,
-        answerKey: byId.get(item.questionId)?.answerKey ?? 'A',
       })),
     }
+  }
+
+  async quizProgress(familyId: string, quizId: string) {
+    const answers = await this.repository.listQuizAnswers(familyId, quizId)
+    return answers.map(({ questionId, selectedKey, isCorrect }) => ({
+      questionId, selectedKey, isCorrect,
+    }))
   }
 
   listQuizQuestions(
@@ -649,13 +645,27 @@ function buildQuestions(
 ): WordQuizQuestion[] {
   const rng = createRng(seedFrom(quiz.id))
   const correctText = (entry: StoredWordEntry) =>
-    quiz.direction === 'en_to_zh' ? entry.meaning : entry.word
+    truncate(quiz.direction === 'en_to_zh' ? entry.meaning : entry.word)
+  const stemText = (entry: StoredWordEntry) =>
+    truncate(quiz.direction === 'en_to_zh' ? entry.word : entry.meaning, 160)
   const pool = dedupeBy(entries, (entry) => normalizeText(correctText(entry)))
   if (pool.length < 4) throw new Error('WORDBOOK_TOO_SMALL')
 
-  const targets = shuffle(entries, rng).slice(
+  // 同一展示题干对应多个答案时不能生成单选题。
+  const meaningsByStem = new Map<string, Set<string>>()
+  for (const entry of entries) {
+    const stem = normalizeText(stemText(entry))
+    const values = meaningsByStem.get(stem) ?? new Set<string>()
+    values.add(normalizeText(correctText(entry)))
+    meaningsByStem.set(stem, values)
+  }
+  const eligible = dedupeBy(entries.filter(
+    (entry) => meaningsByStem.get(normalizeText(stemText(entry)))?.size === 1,
+  ), (entry) => normalizeText(stemText(entry)))
+  if (!eligible.length) throw new Error('WORDBOOK_TOO_SMALL')
+  const targets = shuffle(eligible, rng).slice(
     0,
-    Math.min(quiz.questionCount, entries.length),
+    Math.min(quiz.questionCount, eligible.length),
   )
   return targets.map((target, position) => {
     const answerText = correctText(target)
@@ -686,10 +696,7 @@ function buildQuestions(
       quizId: quiz.id,
       entryId: target.id,
       position,
-      stem: truncate(
-        quiz.direction === 'en_to_zh' ? target.word : target.meaning,
-        160,
-      ),
+      stem: stemText(target),
       options,
       answerKey,
     }
